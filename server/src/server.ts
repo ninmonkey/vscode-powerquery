@@ -1,10 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-import * as LanguageServices from "@microsoft/powerquery-language-services";
+import * as PQLS from "@microsoft/powerquery-language-services";
 import * as LS from "vscode-languageserver";
+
 import { TextDocument } from "vscode-languageserver-textdocument";
-import { Library } from ".";
+import { getOrCreateStandardLibrary } from "./library";
 
 const LanguageId: string = "powerquery";
 
@@ -13,7 +14,16 @@ const LanguageId: string = "powerquery";
 const connection: LS.Connection = LS.createConnection(LS.ProposedFeatures.all);
 const documents: LS.TextDocuments<TextDocument> = new LS.TextDocuments(TextDocument);
 
-let analysisOptions: LanguageServices.AnalysisOptions;
+let analysisOptions: PQLS.AnalysisOptions;
+
+function createAnalysis(document: TextDocument, position: PQLS.Position): PQLS.Analysis {
+    return PQLS.AnalysisUtils.createAnalysis(
+        document,
+        position,
+        getOrCreateStandardLibrary(analysisOptions.locale),
+        analysisOptions,
+    );
+}
 
 connection.onInitialize(() => {
     return {
@@ -38,7 +48,6 @@ connection.onInitialized(() => {
     connection.workspace.getConfiguration({ section: "powerquery" }).then(config => {
         analysisOptions = {
             locale: config?.general?.locale,
-            librarySymbolProvider: Library.createLibraryProvider(),
             maintainWorkspaceCache: true,
         };
     });
@@ -50,12 +59,12 @@ documents.onDidClose(event => {
         uri: event.document.uri,
         diagnostics: [],
     });
-    LanguageServices.documentClosed(event.document);
+    PQLS.documentClosed(event.document);
 });
 
 documents.onDidChangeContent(event => {
     // TODO: pass actual incremental changes into the workspace cache
-    LanguageServices.documentClosed(event.document);
+    PQLS.documentClosed(event.document);
 
     validateDocument(event.document).catch(err =>
         connection.console.error(`validateDocument err: ${JSON.stringify(err, undefined, 4)}`),
@@ -63,7 +72,7 @@ documents.onDidChangeContent(event => {
 });
 
 async function validateDocument(document: LS.TextDocument): Promise<void> {
-    const result: LanguageServices.ValidationResult = LanguageServices.validate(document, {
+    const result: PQLS.ValidationResult = PQLS.validate(document, {
         ...analysisOptions,
         checkForDuplicateIdentifiers: true,
         source: LanguageId,
@@ -83,7 +92,7 @@ connection.onDocumentFormatting((documentfomattingParams: LS.DocumentFormattingP
     const document: LS.TextDocument = maybeDocument;
 
     try {
-        return LanguageServices.tryFormat(document, documentfomattingParams.options, analysisOptions.locale ?? "en-US");
+        return PQLS.tryFormat(document, documentfomattingParams.options, analysisOptions.locale ?? "en-US");
     } catch (err) {
         const error: Error = err;
         const errorMessage: string = error.message;
@@ -108,13 +117,9 @@ connection.onCompletion(
     ): Promise<LS.CompletionItem[]> => {
         const document: LS.TextDocument | undefined = documents.get(textDocumentPosition.textDocument.uri);
         if (document) {
-            const analysis: LanguageServices.Analysis = LanguageServices.createAnalysisSession(
-                document,
-                textDocumentPosition.position,
-                analysisOptions,
-            );
+            const analysis: PQLS.Analysis = createAnalysis(document, textDocumentPosition.position);
 
-            return analysis.getCompletionItems().catch(err => {
+            return analysis.getAutocompleteItems().catch(err => {
                 connection.console.error(`onCompletion error ${JSON.stringify(err, undefined, 4)}`);
                 return [];
             });
@@ -131,7 +136,7 @@ connection.onDocumentSymbol(
     ): Promise<LS.DocumentSymbol[] | undefined> => {
         const document: LS.TextDocument | undefined = documents.get(documentSymbolParams.textDocument.uri);
         if (document) {
-            return LanguageServices.getDocumentSymbols(document, analysisOptions);
+            return PQLS.getDocumentSymbols(document, analysisOptions);
         }
 
         return undefined;
@@ -146,20 +151,16 @@ connection.onHover(
         };
 
         const document: LS.TextDocument | undefined = documents.get(textDocumentPosition.textDocument.uri);
-        if (document) {
-            const analysis: LanguageServices.Analysis = LanguageServices.createAnalysisSession(
-                document,
-                textDocumentPosition.position,
-                analysisOptions,
-            );
-
-            return analysis.getHover().catch(err => {
-                connection.console.error(`onHover error ${JSON.stringify(err, undefined, 4)}`);
-                return emptyHover;
-            });
+        if (document === undefined) {
+            return emptyHover;
         }
 
-        return emptyHover;
+        const analysis: PQLS.Analysis = createAnalysis(document, textDocumentPosition.position);
+
+        return analysis.getHover().catch(err => {
+            connection.console.error(`onHover error ${JSON.stringify(err, undefined, 4)}`);
+            return emptyHover;
+        });
     },
 );
 
@@ -177,11 +178,7 @@ connection.onSignatureHelp(
 
         const document: LS.TextDocument | undefined = documents.get(textDocumentPosition.textDocument.uri);
         if (document) {
-            const analysis: LanguageServices.Analysis = LanguageServices.createAnalysisSession(
-                document,
-                textDocumentPosition.position,
-                analysisOptions,
-            );
+            const analysis: PQLS.Analysis = createAnalysis(document, textDocumentPosition.position);
 
             return analysis.getSignatureHelp().catch(err => {
                 connection.console.error(`onSignatureHelp error ${JSON.stringify(err, undefined, 4)}`);
